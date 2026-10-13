@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+import csv
+import html
+import unicodedata
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+
+RANKING_FILE = Path(__file__).with_name("ranking_publico.csv")
+EXPECTED_COLUMNS = {
+    "Posição",
+    "Pessoa",
+    "Celular final 4",
+    "Votos HELP",
+    "BMG (não conta)",
+    "Sem comprovante",
+    "Revisar",
+    "Atualizado em",
+}
+COUNT_COLUMNS = ("Posição", "Votos HELP", "BMG (não conta)", "Sem comprovante", "Revisar")
+
+
+def normalize_search_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).casefold()
+    return "".join(character for character in normalized if not unicodedata.combining(character))
+
+
+def load_ranking(path: Path) -> tuple[list[dict[str, Any]], str]:
+    with path.open("r", encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source, delimiter=";")
+        if not reader.fieldnames or not EXPECTED_COLUMNS.issubset(reader.fieldnames):
+            raise ValueError("O CSV não tem as colunas esperadas para o ranking.")
+
+        rows: list[dict[str, Any]] = []
+        for line_number, source_row in enumerate(reader, start=2):
+            if not (source_row.get("Pessoa") or "").strip():
+                continue
+            row: dict[str, Any] = dict(source_row)
+            try:
+                for column in COUNT_COLUMNS:
+                    row[column] = int(row[column] or 0)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Valor numérico inválido na linha {line_number} do CSV."
+                ) from error
+            rows.append(row)
+
+    rows.sort(key=lambda row: (row["Posição"], row["Pessoa"].casefold()))
+    updated_at = max((row.get("Atualizado em", "").strip() for row in rows), default="")
+    return rows, updated_at
+
+
+def add_progress_goal(rows: list[dict[str, Any]]) -> None:
+    for index, row in enumerate(rows):
+        if index == 0:
+            row["Próximo objetivo"] = "🥇 Líder"
+            continue
+
+        target_index = index - 1 if index <= 2 else 2
+        target_row = rows[target_index]
+        target_place = target_index + 1
+        votes_needed = max(1, target_row["Votos HELP"] - row["Votos HELP"] + 1)
+        noun = "voto" if votes_needed == 1 else "votos"
+        row["Próximo objetivo"] = f"Faltam {votes_needed} {noun} para o {target_place}º lugar"
+
+
+st.set_page_config(
+    page_title="Ranking HELP | Prêmio Reclame Aqui",
+    page_icon="🏆",
+    layout="wide",
+)
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: none; margin-left: 0; margin-right: 0;
+        padding: 2rem 1.5rem 3rem;
+    }
+    div[data-testid="stMetric"] {
+        background: linear-gradient(145deg, #202b3a, #17212e);
+        border: 1px solid #3a4a60; border-radius: 14px;
+        padding: 16px 18px; box-shadow: 0 5px 16px rgba(0, 0, 0, .22);
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricLabel"],
+    div[data-testid="stMetric"] [data-testid="stMetricLabel"] *,
+    div[data-testid="stMetric"] [data-testid="stMetricDelta"],
+    div[data-testid="stMetric"] [data-testid="stMetricDelta"] * {
+        color: #cbd5e1 !important;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"],
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] * {
+        color: #f8fafc !important; font-weight: 750;
+    }
+    .last-update {
+        display: flex; align-items: center; gap: 14px; margin: 10px 0 22px;
+        padding: 16px 20px; border: 1px solid #fed7aa; border-left: 6px solid #f97316;
+        border-radius: 14px; background: linear-gradient(100deg, #fff7ed, #ffffff);
+    }
+    .last-update-icon {font-size: 1.8rem;}
+    .last-update-label {color: #9a3412; font-size: .78rem; font-weight: 800;
+        letter-spacing: .08em; text-transform: uppercase;}
+    .last-update-value {color: #431407; font-size: 1.15rem; font-weight: 700;
+        margin-top: 2px;}
+    .prize-card {
+        min-height: 112px; padding: 18px 14px; text-align: center;
+        border: 1px solid #3a4a60; border-radius: 14px;
+        background: linear-gradient(145deg, #202b3a, #17212e);
+        box-shadow: 0 5px 16px rgba(0, 0, 0, .18);
+    }
+    .prize-place {font-size: .95rem; font-weight: 750; color: #cbd5e1;}
+    .prize-value {margin-top: 8px; font-size: 1.9rem; font-weight: 850; color: #f8fafc;}
+    .prize-card.gold {border-top: 4px solid #facc15;}
+    .prize-card.silver {border-top: 4px solid #cbd5e1;}
+    .prize-card.bronze {border-top: 4px solid #d9905b;}
+    @media (max-width: 700px) {
+        .block-container {padding: 1rem .75rem 2rem;}
+        h1 {font-size: 1.7rem !important;}
+        h2, h3 {font-size: 1.25rem !important;}
+        div[data-testid="stHorizontalBlock"] {
+            flex-direction: column !important; gap: .55rem !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+            width: 100% !important; flex: 1 1 100% !important; min-width: 0 !important;
+        }
+        div[data-testid="stMetric"] {padding: 12px 14px;}
+        .last-update {gap: 10px; padding: 12px 14px; margin-bottom: 16px;}
+        .last-update-value {font-size: 1rem;}
+        .prize-card {min-height: 0; padding: 12px;}
+        .prize-value {font-size: 1.55rem;}
+        div[data-testid="stPlotlyChart"], div[data-testid="stDataFrame"] {
+            max-width: 100%;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("🏆 Ranking HELP")
+st.caption("Nova competição | Grupo Help · outubro 2026")
+
+try:
+    ranking, updated_at = load_ranking(RANKING_FILE)
+except FileNotFoundError:
+    st.error("Ainda não há um ranking publicado.")
+    st.stop()
+except (OSError, ValueError, csv.Error) as error:
+    st.error(f"Não foi possível ler o ranking: {error}")
+    st.stop()
+
+if not ranking:
+    st.info("O ranking está vazio.")
+    st.stop()
+
+add_progress_goal(ranking)
+
+try:
+    parsed_update = datetime.fromisoformat(updated_at)
+    display_update = parsed_update.strftime("%d/%m/%Y às %H:%M")
+except ValueError:
+    display_update = updated_at or "não informada"
+
+safe_update = html.escape(f"{display_update} · Horário de Brasília")
+st.markdown(
+    f'<div class="last-update"><div class="last-update-icon">🕒</div>'
+    f'<div><div class="last-update-label">Última atualização</div>'
+    f'<div class="last-update-value">{safe_update}</div></div></div>',
+    unsafe_allow_html=True,
+)
+
+total_help = sum(row["Votos HELP"] for row in ranking)
+first_place = ranking[0]
+
+left, middle, right = st.columns(3)
+left.metric("Votos para HELP", f"{total_help:,}".replace(",", "."))
+middle.metric("Pessoas no ranking", len(ranking))
+right.metric("Líder atual", first_place["Pessoa"])
+
+st.divider()
+st.subheader("🎁 Premiação do Top 3")
+prize_columns = st.columns(3)
+prizes = [
+    ("gold", "🥇 1º lugar", "R$ 700"),
+    ("silver", "🥈 2º lugar", "R$ 500"),
+    ("bronze", "🥉 3º lugar", "R$ 300"),
+]
+for column, (style, place, value) in zip(prize_columns, prizes):
+    with column:
+        st.markdown(
+            f'<div class="prize-card {style}">'
+            f'<div class="prize-place">{place}</div>'
+            f'<div class="prize-value">{value}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+st.divider()
+st.subheader("🔥 Disputa do Top 7")
+top7 = ranking[:7]
+chart_data = pd.DataFrame(
+    {
+        "Pessoa": [
+            f"{row['Pessoa']} · {row['Celular final 4']}"
+            if row["Celular final 4"]
+            else row["Pessoa"]
+            for row in top7
+        ],
+        "Votos HELP": [row["Votos HELP"] for row in top7],
+    }
+)
+figure = px.bar(
+    chart_data,
+    x="Votos HELP",
+    y="Pessoa",
+    orientation="h",
+    text="Votos HELP",
+    labels={"Pessoa": "", "Votos HELP": "Votos para HELP"},
+    color_discrete_sequence=["#ec5b3f"],
+)
+figure.update_traces(
+    textposition="outside",
+    textfont_size=16,
+    textfont_color="#f8fafc",
+    cliponaxis=False,
+    hovertemplate="<b>%{y}</b><br>Votos HELP: %{x}<extra></extra>",
+)
+figure.update_layout(
+    height=max(390, 60 * len(top7) + 75),
+    margin={"l": 8, "r": 36, "t": 12, "b": 12},
+    plot_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="rgba(0,0,0,0)",
+    showlegend=False,
+    font={"family": "Arial, sans-serif", "color": "#f8fafc", "size": 14},
+    xaxis={
+        "showgrid": True,
+        "gridcolor": "#334155",
+        "zeroline": False,
+        "tickfont": {"size": 13},
+    },
+    yaxis={
+        "title": None,
+        "categoryorder": "array",
+        "categoryarray": list(reversed(chart_data["Pessoa"].tolist())),
+        "automargin": True,
+        "tickfont": {"size": 17, "color": "#f8fafc"},
+    },
+)
+st.plotly_chart(figure, use_container_width=True, config={"displayModeBar": False})
+
+st.divider()
+st.subheader("📣 Sua posição no ranking")
+st.caption(
+    "O próximo objetivo muda conforme sua posição: subir uma colocação dentro do Top 3 "
+    "ou alcançar o terceiro lugar para quem está fora dele."
+)
+
+table_data = pd.DataFrame(
+    [
+        {
+            "Posição": row["Posição"],
+            "Pessoa": row["Pessoa"],
+            "Final do celular": row["Celular final 4"] or "—",
+            "Votos HELP": row["Votos HELP"],
+            "Próximo objetivo": row["Próximo objetivo"],
+        }
+        for row in ranking
+    ]
+)
+
+search_text = st.text_input(
+    "🔎 Procure seu nome na tabela",
+    placeholder="Digite seu nome ou os quatro últimos dígitos do celular",
+)
+visible_table = table_data
+if search_text.strip():
+    normalized_query = normalize_search_text(search_text.strip())
+    match_mask = table_data.apply(
+        lambda row: normalized_query in normalize_search_text(str(row["Pessoa"]))
+        or normalized_query in str(row["Final do celular"]),
+        axis=1,
+    )
+    visible_table = table_data[match_mask]
+    if visible_table.empty:
+        st.info("Não encontrei esse nome ou final de celular no ranking.")
+    else:
+        st.caption(f"Encontradas {len(visible_table)} pessoa(s).")
+else:
+    st.caption(f"Todas as {len(table_data)} pessoas do ranking")
+
+st.dataframe(
+    visible_table,
+    hide_index=True,
+    use_container_width=True,
+    column_config={
+        "Posição": st.column_config.NumberColumn("Pos.", format="%d"),
+        "Pessoa": st.column_config.TextColumn("Pessoa"),
+        "Final do celular": st.column_config.TextColumn("Final 4"),
+        "Votos HELP": st.column_config.NumberColumn("Votos HELP", format="%d"),
+        "Próximo objetivo": st.column_config.TextColumn(
+            "Próximo objetivo",
+            help="Votos necessários para ultrapassar a pessoa logo acima, ou alcançar o Top 3.",
+        ),
+    },
+)
